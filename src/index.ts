@@ -13,21 +13,23 @@ import wrapperAbi from "./abis/wrapperAbi.json";
 async function main(): Promise<void> {
   setDefaultEnvVar("PORT", "8080");
   setDefaultEnvVar("HOST", "127.0.0.1");
-  setDefaultEnvVar("RPC_URL_NOVA", "");
+  setDefaultEnvVar("RPC_URL_NOVA_WSS", "");
   setDefaultEnvVar("RPC_URL_ETH", "");
   setDefaultEnvVar("PRIVATE_KEY", "");
   setDefaultEnvVar("NFT_BRIDGE_ADDRESS_L2", "");
   setDefaultEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER", "");
+  setDefaultEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER_PK", "");
   setDefaultEnvVar("ALCHEMY_AUTH", "")
   setDefaultEnvVar("NGROK_AUTH", "");
   setDefaultEnvVar("NGROK_DOMAIN", "");
 
   const port = +getRequiredEnvVar("PORT");
   const host = getRequiredEnvVar("HOST");
-  const rpcUrl = getRequiredEnvVar("RPC_URL_NOVA");
+  const rpcWss = getRequiredEnvVar("RPC_URL_NOVA_WSS");
   const rpcUrlEth = getRequiredEnvVar("RPC_URL_ETH");
   const walletPK = getRequiredEnvVar("PRIVATE_KEY");
-  const nftBridgeAddress_L2 = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_L2");
+  const receiverWalletPK = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER_PK");
+  const wrapperAddress_L2 = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_L2");
   const nftBridgeAddress_Receiver = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER");
   const alchemyAuthToken = getRequiredEnvVar("ALCHEMY_AUTH");
   const ngrokAuthToken = getRequiredEnvVar("NGROK_AUTH");
@@ -40,13 +42,15 @@ async function main(): Promise<void> {
   console.log(`- Host: ${host}`);
 
   console.log(`\u203A Blockchain Node Configuration`);
-  console.log(`- RPC URL: ${rpcUrl}`);
+  console.log(`- NOVA RPC URL: ${rpcWss}`);
+  console.log(`- ETH RPC URL: ${rpcUrlEth}`);
 
   console.log(`\u203A Wallet Configuration`);
-  console.log(`- Private Key: ${walletPK}`);
+  console.log(`- Private Key Nova: ${walletPK}`);
+  console.log(`- Private Key Wrapper Receiver: ${receiverWalletPK}`);
 
   console.log(`\u203A Contract Addresses`);
-  console.log(`- Bridge Address: ${nftBridgeAddress_L2}`);
+  console.log(`- Bridge Address: ${wrapperAddress_L2}`);
   console.log(`- Bridge Receiver: ${nftBridgeAddress_Receiver}`);
 
   console.log(`\u203A External Service Configuration`);
@@ -54,11 +58,11 @@ async function main(): Promise<void> {
   console.log(`- Ngrok Authentication Token: ${ngrokAuthToken}`);
   console.log(`- Ngrok Domain: ${ngrokDomain}`);
 
-  const novaProvider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  const novaProvider = new ethers.providers.WebSocketProvider(rpcWss);
   const ethProvider = new ethers.providers.JsonRpcProvider(rpcUrlEth);
   const novaSigner = new ethers.Wallet(walletPK, novaProvider);
-  const nftBridgeContract = new ethers.Contract(nftBridgeAddress_L2, wrapperAbi, novaSigner);
-  const ethSigner = new ethers.Wallet(walletPK, ethProvider);
+  const ethSigner = new ethers.Wallet(receiverWalletPK, ethProvider);
+  const wrapperContract = new ethers.Contract(wrapperAddress_L2, wrapperAbi, novaSigner);
 
   const settings = {
     authToken: alchemyAuthToken,
@@ -98,36 +102,56 @@ async function main(): Promise<void> {
     try {
       res.status(200).send("Processing the Response...");
       const activity = webhookEvent.event.activity[0];
-      console.log('Received')
       if (activity.category === 'token' && activity.erc721TokenId !== undefined) {
         const contract = activity.rawContract.address;
         const from = activity.fromAddress;
-        const to = activity.toAddress;
         const tokenId = Number(activity.erc721TokenId);
+        console.log(`=> Wrap Request\nContract: ${contract}, From: ${from}, Token ID: ${tokenId}`);
 
-        console.log("contract", contract);
-        console.log("from", from);
-        console.log("to", to);
-        console.log("tokenId", tokenId);
-
-        const requestedCollection = new ethers.Contract(contract, Erc721Abi, ethSigner);
+        const requestedCollection = new ethers.Contract(contract, Erc721Abi, novaSigner);
         const tokenUri = await requestedCollection.tokenURI(ethers.BigNumber.from(tokenId));
-        // const tx = await nftBridgeContract.wrapNFT(contract, ethers.utils.BigNumberFrom(tokenId.toString()), tokenUri);
-        // await tx.wait();
-        console.log('Bridged Successfully!');
+        const tx = await wrapperContract.wrapNFT(contract, ethers.utils.BigNumberFrom(tokenId.toString()), tokenUri);
+        await tx.wait();
+        console.log(`${contract}'s token Id ${tokenId} WRAPPED successfully.`);
       }
-    } catch (err) {
-      console.log("Bridge Failed: ", JSON.stringify(err, null, 2));
+    } catch (error) {
+      console.log("Wrap Failed: ", JSON.stringify(error, null, 2));
     }
   });
 
   // == LISTENER ==
+  const filter = {
+    address: wrapperAddress_L2,
+    topics: [ethers.utils.id("NFTUnwrapped(address,address,uint256)")]
+  }
+  novaProvider.on(filter, async (log) => {
+    const decodedData = ethers.utils.defaultAbiCoder.decode(['address', 'address', 'uint256'], log.data);
+    const txReceipt = await novaProvider.getTransaction(log.transactionHash);
+    const l1Address = decodedData[0];
+    const sender = txReceipt.from;
+    const tokenId = decodedData[2];
+    console.log(`=> Unwrap Request\nL1Address: ${l1Address}, From: ${sender}, Token ID: ${tokenId}`);
+    console.log('Event Log:', JSON.stringify(log, null, 4));
+
+    try {
+      await txReceipt.wait(25);
+      const requestedCollection = new ethers.Contract(l1Address, Erc721Abi, ethSigner);
+      const transfer = await requestedCollection.transferFrom(nftBridgeAddress_Receiver, sender, tokenId);
+      await transfer.wait();
+
+      const gasFees = await ethProvider.getGasPrice();
+      const setFees = await wrapperContract.setUnwrapFees(ethers.utils.BigNumberFrom(Number(gasFees) * (84904 + 21000 + 8500))); // ERC721 Transfer + Eth Transfer + (Priority + Misc)
+      await setFees.wait();
+      console.log(`${l1Address}'s token Id ${Number(tokenId)} UNWRAPPED successfully by ${sender}, Fee Set to ${ethers.utils.parseEther((Number(gasFees) * 84904).toString())} Eth.`);
+    } catch (error) {
+      console.log(`Unwrap Failed ${error.code || 'UNKNOWN_ERR'}: `, JSON.stringify(error, null, 2));
+    }
+  });
   app.listen(port, host, async () => {
-    console.log(`NFT Bridge listening at ${host}:${port}`);
+    console.log(`NFT Wrapper listening at ${host}:${port}`);
     const ngrokUrl = await ngrok.connect({
       addr: port,
       authtoken: ngrokAuthToken,
-      domain: 'sensibly-present-dragon.ngrok-free.app'
     });
     console.log(`Webhook exposed at: ${ngrokUrl.url()}`);
   });
