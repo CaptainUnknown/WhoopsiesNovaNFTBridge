@@ -11,12 +11,13 @@ import Erc721Abi from "./abis/erc721Abi.json";
 import wrapperAbi from "./abis/wrapperAbi.json";
 
 async function main(): Promise<void> {
-  setDefaultEnvVar("PORT", "8080");
+  setDefaultEnvVar("PORT", "8081");
   setDefaultEnvVar("HOST", "127.0.0.1");
   setDefaultEnvVar("RPC_URL_NOVA_WSS", "");
   setDefaultEnvVar("RPC_URL_ETH", "");
   setDefaultEnvVar("PRIVATE_KEY", "");
   setDefaultEnvVar("NFT_BRIDGE_ADDRESS_L2", "");
+  setDefaultEnvVar("NFT_BRIDGE_ADDRESS_DEPLOYER", "");
   setDefaultEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER", "");
   setDefaultEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER_PK", "");
   setDefaultEnvVar("ALCHEMY_AUTH", "")
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
   const walletPK = getRequiredEnvVar("PRIVATE_KEY");
   const receiverWalletPK = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER_PK");
   const wrapperAddress_L2 = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_L2");
+  const wrapperDeployer = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_DEPLOYER");
   const nftBridgeAddress_Receiver = getRequiredEnvVar("NFT_BRIDGE_ADDRESS_RECEIVER");
   const alchemyAuthToken = getRequiredEnvVar("ALCHEMY_AUTH");
   const ngrokAuthToken = getRequiredEnvVar("NGROK_AUTH");
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
   console.log(`\u203A Contract Addresses`);
   console.log(`- Bridge Address: ${wrapperAddress_L2}`);
   console.log(`- Bridge Receiver: ${nftBridgeAddress_Receiver}`);
+  console.log(`- Bridge Deployer: ${wrapperDeployer}`);
 
   console.log(`\u203A External Service Configuration`);
   console.log(`- Alchemy Authentication Token: ${alchemyAuthToken}`);
@@ -63,6 +66,11 @@ async function main(): Promise<void> {
   const novaSigner = new ethers.Wallet(walletPK, novaProvider);
   const ethSigner = new ethers.Wallet(receiverWalletPK, ethProvider);
   const wrapperContract = new ethers.Contract(wrapperAddress_L2, wrapperAbi, novaSigner);
+
+  // // TODO: REMOVE TESTNET CONFIG:
+  // const novaWssProvider = new ethers.providers.WebSocketProvider("wss://eth-sepolia.g.alchemy.com/v2/o6Tf7E4mhXAUwGY3t6f8e4T657dIHfqm");
+  // const novaWssSigner = new ethers.Wallet(walletPK, novaWssProvider);
+  // const wrapperContract = new ethers.Contract("0x76172383110D9e03AD02C096dB7AcAadA9e57eeE", wrapperAbi, novaWssSigner);
 
   const settings = {
     authToken: alchemyAuthToken,
@@ -110,7 +118,7 @@ async function main(): Promise<void> {
 
         const requestedCollection = new ethers.Contract(contract, Erc721Abi, novaSigner);
         const tokenUri = await requestedCollection.tokenURI(ethers.BigNumber.from(tokenId));
-        const tx = await wrapperContract.wrapNFT(contract, ethers.utils.BigNumberFrom(tokenId.toString()), tokenUri);
+        const tx = await wrapperContract.wrapNFT(contract, ethers.BigNumber.from(tokenId.toString()), tokenUri);
         await tx.wait();
         console.log(`${contract}'s token Id ${tokenId} WRAPPED successfully.`);
       }
@@ -140,7 +148,7 @@ async function main(): Promise<void> {
       await transfer.wait();
 
       const gasFees = await ethProvider.getGasPrice();
-      const setFees = await wrapperContract.setUnwrapFees(ethers.utils.BigNumberFrom(Number(gasFees) * (84904 + 21000 + 8500))); // ERC721 Transfer + Eth Transfer + (Priority + Misc)
+      const setFees = await wrapperContract.setUnwrapFees(ethers.BigNumber.from(Number(gasFees) * (84904 + 21000 + 8500))); // ERC721 Transfer + Eth Transfer + (Priority + Misc)
       await setFees.wait();
       console.log(`${l1Address}'s token Id ${Number(tokenId)} UNWRAPPED successfully by ${sender}, Fee Set to ${ethers.utils.parseEther((Number(gasFees) * 84904).toString())} Eth.`);
     } catch (error) {
@@ -152,6 +160,7 @@ async function main(): Promise<void> {
     const ngrokUrl = await ngrok.connect({
       addr: port,
       authtoken: ngrokAuthToken,
+      domain: '',
     });
     console.log(`Webhook exposed at: ${ngrokUrl.url()}`);
   });
